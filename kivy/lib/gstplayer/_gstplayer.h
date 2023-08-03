@@ -1,5 +1,9 @@
 #include <glib.h>
 #include <gst/gst.h>
+#include <stdbool.h>
+#include <time.h>
+#include <sys/time.h>
+#include <stdio.h>
 
 static void c_glib_iteration(int count)
 {
@@ -16,6 +20,20 @@ static void g_object_set_void(GstElement *element, char *name, void *value)
 }
 
 static void g_object_set_double(GstElement *element, char *name, double value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
+
+static void g_object_set_bool(GstElement *element, char *name, bool value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
+
+static void g_object_set_obj(GstElement *element, char *name, GstElement *value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
+static void g_object_set_str(GstElement *element, char *name, char *value)
 {
 	g_object_set(G_OBJECT(element), name, value, NULL);
 }
@@ -39,6 +57,10 @@ typedef struct {
 	char eventname[15];
 	PyObject *userdata;
 } callback_data_t;
+
+typedef struct {
+	char *segment_file_template;
+} callback_get_format_location_data_t;
 
 static GstFlowReturn c_on_appsink_sample(GstElement *appsink, callback_data_t *data)
 {
@@ -180,3 +202,51 @@ static gulong c_bus_connect_message(GstBus *bus, buscallback_t callback, PyObjec
 			G_CALLBACK(c_on_bus_message), data,
 			c_signal_free_data, 0);
 }
+
+static void c_signal_free_get_format_location_data_t(gpointer data, GClosure *closure)
+{
+	callback_get_format_location_data_t *cdata = data;
+//	Py_DECREF(cdata);
+	free(cdata);
+}
+
+static char* format_location_callback(const gchar *segment_file_template, int fragment_id)
+{
+    g_info("format_location_callback");
+    time_t timer;
+    struct tm* tm_info;
+    struct timeval tv;
+    char date_time_buffer[26];
+    char date_time_buffer_usec[33];
+    char* ret = (char *)malloc(200 * sizeof(char));
+    int usec;
+
+    timer = time(NULL);
+    tm_info = localtime(&timer);
+    strftime(date_time_buffer, 26, "%Y-%m-%d-%H-%M-%S-%06d", tm_info);
+    gettimeofday(&tv, NULL);
+    usec = tv.tv_usec;
+    sprintf(date_time_buffer_usec, "%s-%06d", date_time_buffer, usec);
+    sprintf(ret, segment_file_template, date_time_buffer_usec, fragment_id);
+    return ret;
+}
+static char* c_on_get_format_location(GstElement *el, guint fragment_id, callback_get_format_location_data_t *data)
+{
+	//g_return_val_if_fail( GST_MESSAGE_TYPE( message ) == GST_MESSAGE_EOS, FALSE);
+	g_info("c_on_get_format_location");
+	return format_location_callback(data->segment_file_template, fragment_id);
+}
+
+static gulong c_element_get_format_location(GstElement *el, char *segment_file_template)
+{
+	callback_get_format_location_data_t *data = (callback_get_format_location_data_t *)malloc(sizeof(callback_get_format_location_data_t));
+	if ( data == NULL )
+		return 0;
+	data->segment_file_template = segment_file_template;
+//	Py_INCREF(data);
+
+	return g_signal_connect_data((GstElement *)el, "format-location",
+			G_CALLBACK(c_on_get_format_location), data,
+			c_signal_free_get_format_location_data_t, 0);
+}
+

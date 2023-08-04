@@ -34,6 +34,8 @@ else:
 Logger.info('VideoGstplayer: Using Gstreamer {}'.format(
     '.'.join(map(str, get_gst_version()))))
 
+def quote(filename):
+    return '"' + filename.replace('\\', '\\\\').replace('"','\"') + '"'
 
 def _on_gstplayer_buffer(video, width, height, data):
     video = video()
@@ -51,6 +53,8 @@ def _on_gstplayer_message(mtype, message):
         Logger.warning('VideoGstplayer: {}'.format(message))
     elif mtype == 'info':
         Logger.info('VideoGstplayer: {}'.format(message))
+    else:
+        Logger.debug('VideoGstplayer: {}'.format(message))
 
 
 class VideoGstplayer(VideoBase):
@@ -59,6 +63,9 @@ class VideoGstplayer(VideoBase):
         self.player = None
         self._buffer = None
         self._buffer_lock = Lock()
+        self.gst_options = {}
+        for k in [k for k in kwargs.keys() if k.startswith('gst_')]:
+            self.gst_options[k[4:]] = kwargs.pop(k)
         super(VideoGstplayer, self).__init__(**kwargs)
 
     def _on_gst_eos_sync(self):
@@ -68,9 +75,12 @@ class VideoGstplayer(VideoBase):
         Logger.debug('VideoGstplayer: Load <{}>'.format(self._filename))
         uri = self._get_uri()
         wk_self = ref(self)
+        self.gst_options['uri'] = uri
+        self.gst_options['filename'] = quote(self.filename)
         self.player_callback = partial(_on_gstplayer_buffer, wk_self)
         self.player = GstPlayer(uri, self.player_callback,
-                                self._on_gst_eos_sync, _on_gstplayer_message)
+                                self._on_gst_eos_sync, _on_gstplayer_message,
+                                self.gst_options)
         self.player.load()
 
     def unload(self):

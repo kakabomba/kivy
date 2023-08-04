@@ -1,3 +1,5 @@
+import datetime
+
 from libcpp cimport bool
 from weakref import ref
 import atexit
@@ -45,6 +47,10 @@ cdef extern from 'gst/gst.h':
         GST_MESSAGE_ERROR
         GST_MESSAGE_WARNING
         GST_MESSAGE_INFO
+        GST_MESSAGE_ELEMENT
+        GST_MESSAGE_SEGMENT_START
+        GST_MESSAGE_SEGMENT_DONE
+
 
     ctypedef struct GstMessage:
         GstMessageType type
@@ -59,6 +65,8 @@ cdef extern from 'gst/gst.h':
     bool gst_bin_remove(GstBin *bin, GstElement *element)
     void gst_object_unref(void *pointer) nogil
     GstElement *gst_pipeline_new(const_gchar *name)
+    GstElement *gst_parse_launch(const_gchar *pipeline_description, GError **error)
+    GstElement *gst_bin_get_by_name(GstBin *bin, const_gchar *name);
     void gst_bus_enable_sync_message_emission(GstBus *bus)
     GstBus *gst_pipeline_get_bus(GstPipeline *pipeline)
     GstStateChangeReturn gst_element_get_state(
@@ -86,6 +94,9 @@ cdef extern from 'gst/gst.h':
 cdef extern from '_gstplayer.h':
     void g_object_set_void(GstElement *element, char *name, void *value)
     void g_object_set_double(GstElement *element, char *name, double value) nogil
+    void g_object_set_bool(GstElement *element, char *name, bool value)
+    void g_object_set_str(GstElement *element, char *name, char *value)
+    void g_object_set_obj(GstElement *element, char *name, GstElement *element)
     void g_object_set_caps(GstElement *element, char *value)
     void g_object_set_int(GstElement *element, char *name, int value)
     gulong c_appsink_set_sample_callback(GstElement *appsink,
@@ -94,13 +105,25 @@ cdef extern from '_gstplayer.h':
             appcallback_t callback, void *userdata) nogil
     gulong c_bus_connect_message(GstBus *bus,
             buscallback_t callback, void *userdata)
+
+    gulong c_element_get_format_location(GstElement *el, char *segment_file_template)
     void c_signal_disconnect(GstElement *appsink, gulong handler_id)
     void c_glib_iteration(int count)
 
+    char* format_location_callback(char*, char*, int fragment_id)
 
-#
-# prevent gstreamer crash when some player are still working.
-#
+cdef extern from 'gst/gststructure.h':
+    ctypedef void *GstStructure
+    char* gst_structure_get_string(GstStructure* structure, char* fieldname);
+    char * gst_structure_get_name(GstStructure * structure);
+
+cdef extern from 'gst/gstmessage.h':
+    const GstStructure *gst_message_get_structure(GstMessage *message);
+
+cdef void sent_save_now_signal(void *c_element, char *name):
+    cdef GstSample * ret_value = NULL
+    g_signal_emit_by_name(c_element, name, ret_value)
+
 
 cdef list _instances = []
 
@@ -135,20 +158,34 @@ cdef void _on_appsink_sample(
 cdef void _on_gstplayer_message(void *c_player, GstMessage *message) with gil:
     cdef GstPlayer player = <GstPlayer>c_player
     cdef GError *err = NULL
+    cdef char* filename
     if message.type == GST_MESSAGE_EOS:
         player.got_eos()
     elif message.type == GST_MESSAGE_ERROR:
         gst_message_parse_error(message, &err, NULL)
         player.message_cb('error', err.message)
-        g_error_free(err);
+        g_error_free(err)
     elif message.type == GST_MESSAGE_WARNING:
         gst_message_parse_warning(message, &err, NULL)
         player.message_cb('warning', err.message)
-        g_error_free(err);
+        g_error_free(err)
     elif message.type == GST_MESSAGE_INFO:
         gst_message_parse_info(message, &err, NULL)
         player.message_cb('info', err.message)
-        g_error_free(err);
+        g_error_free(err)
+    elif message.type == GST_MESSAGE_ELEMENT:
+        player.message_cb('warning', 'GST_MESSAGE_ELEMENT')
+        if player.recording_options:
+            player.message_cb('warning', '1 GST_MESSAGE_ELEMENT')
+            s = gst_message_get_structure(message)
+            player.message_cb('warning', '2 GST_MESSAGE_ELEMENT')
+            filename = gst_structure_get_string(s, "location")
+            player.message_cb('warning', '3 GST_MESSAGE_ELEMENT')
+            name = gst_structure_get_name(s)
+            player.message_cb('warning', '4 GST_MESSAGE_ELEMENT')
+            player.recording_options['segment_callback'](
+                name.decode('utf-8', 'ignore'), filename.decode('utf-8', 'ignore'))
+            player.message_cb('warning', '5 GST_MESSAGE_ELEMENT')
     else:
         pass
 
@@ -173,31 +210,59 @@ def glib_iteration(int loop):
     c_glib_iteration(loop)
 
 
+# cdef class UserData(object):
+#     def __init__(self, sd, cid):
+#         self.save_dir = sd
+#         self.camera_id = cid
+
 cdef class GstPlayer:
     cdef GstElement *pipeline
     cdef GstElement *playbin
     cdef GstElement *appsink
     cdef GstElement *fakesink
+    cdef GstElement *recordingmuxer
     cdef GstBus *bus
-    cdef object uri, sample_cb, eos_cb, message_cb
-    cdef gulong hid_sample, hid_message
+    cdef object uri, options, sample_cb, eos_cb, message_cb, recording_options
+    cdef gboolean stop_video
+    cdef gulong hid_sample, hid_message, hid_on_get_format_location
+
     cdef object __weakref__
 
     def __cinit__(self, *args, **kwargs):
         self.pipeline = self.playbin = self.appsink = self.fakesink = NULL
         self.bus = NULL
-        self.hid_sample = self.hid_message = 0
+        self.recordingmuxer = NULL
+        self.hid_sample = self.hid_message = self.hid_on_get_format_location = 0
 
-    def __init__(self, uri, sample_cb=None, eos_cb=None, message_cb=None):
+    def __init__(self, uri, sample_cb=None, eos_cb=None, message_cb=None, options=None):
         super(GstPlayer, self).__init__()
+        options = options or {}
         self.uri = uri
+        self.recording_options = options.pop('recording', None)
+        self.options = options
         self.sample_cb = sample_cb
         self.eos_cb = eos_cb
         self.message_cb = message_cb
+        self.stop_video = 0
         _instances.append(ref(self, _on_player_deleted))
 
         # ensure gstreamer is init
         _gst_init()
+
+    def send_signal(self, element_name, signal_name):
+        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, element_name)
+        sent_save_now_signal(recording_valve, signal_name)
+
+    def syncvideo(self):
+        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, 'recordingmuxer')
+        sent_save_now_signal(recording_valve, "split-now")
+
+    def stopvideo(self):
+        if not self.stop_video:
+            self.send_signal('recordingmuxer', 'split-now')
+        self.stop_video = 1
+        # g_signal_emit_by_name(recording_valve, "split-now")
+        # g_object_set_bool(recording_valve, 'drop', value)
 
     def __dealloc__(self):
         self.unload()
@@ -206,17 +271,56 @@ cdef class GstPlayer:
         if self.eos_cb:
             self.eos_cb()
 
+    def set_property_int_value(self, name, prop_name, value):
+        self.message_cb('info', f'Setting property {name}.{prop_name}={value}')
+        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, name)
+        g_object_set_int(recording_valve, prop_name, value)
+        return value
+
+    def send_signal(self, name, signal):
+        el = gst_bin_get_by_name(<GstBin *> self.pipeline, name)
+        self.message_cb('info', f'Sending signal {name} {signal}')
+        sent_save_now_signal(el, signal)
+
     def load(self):
         cdef bytes py_uri
+        cdef GError *error = NULL
 
         # if already loaded before, clean everything.
         if self.pipeline != NULL:
             self.unload()
 
         # create the pipeline
-        self.pipeline = gst_pipeline_new(NULL)
-        if self.pipeline == NULL:
-            raise GstPlayerException('Unable to create a pipeline')
+        if 'pipeline' not in self.options:
+            self.pipeline = gst_pipeline_new(NULL)
+            if self.pipeline == NULL:
+                raise GstPlayerException('Unable to create a pipeline')
+        else:
+            pipeline_opt = self.options['pipeline']
+            if isinstance(pipeline_opt, str):
+                pipeline_opt = [s.strip() for s in pipeline_opt.split('!')]
+            elementtypes = [s.split(None, 1)[0].strip() for s in pipeline_opt if s]
+            if 'appsink' not in elementtypes:
+                if 'capsfilter' not in elementtypes:
+                    pipeline_opt.append('capsfilter caps="video/x-raw, format=RGB"')
+                pipeline_opt.append('appsink name="sink"')
+            pipeline_str = ' ! '.join(pipeline_opt).format(**self.options)
+            py_uri = <bytes>(pipeline_str).encode('utf-8')
+            self.message_cb('debug', 'Pipeline: {}'.format(pipeline_str))
+            self.pipeline = gst_parse_launch(<char *>py_uri, &error)
+            if self.pipeline != NULL:
+                self.appsink = gst_bin_get_by_name(<GstBin *>self.pipeline, "sink")
+                if self.appsink == NULL:
+                    self.message_cb('error', 'Unable to find name "sink" in pipeline')
+                    gst_object_unref(self.pipeline)
+                    self.pipeline = NULL
+                    return
+            else:
+                self.message_cb('error', 'Unable to parse a pipeline' + (
+                        '' if error == NULL else ', code={} message={}'.format(
+                                error.code, <bytes>error.message)
+                        ))
+                return
 
         self.bus = gst_pipeline_get_bus(<GstPipeline *>self.pipeline)
         if self.bus == NULL:
@@ -227,39 +331,44 @@ cdef class GstPlayer:
             self.hid_message = c_bus_connect_message(
                     self.bus, _on_gstplayer_message, <void *>self)
 
-        # instantiate the playbin
-        self.playbin = gst_element_factory_make('playbin', NULL)
-        if self.playbin == NULL:
-            raise GstPlayerException(
-                'Unable to create a playbin. Consider setting the environment variable '
-                'GST_REGISTRY to a user accessible path, such as ~/registry.bin')
+        if self.appsink == NULL:
+            # instantiate the playbin
+            self.playbin = gst_element_factory_make('playbin', NULL)
+            if self.playbin == NULL:
+                raise GstPlayerException(
+                    'Unable to create a playbin. Consider setting the environment variable '
+                    'GST_REGISTRY to a user accesible path, such as ~/registry.bin')
 
-        gst_bin_add(<GstBin *>self.pipeline, self.playbin)
+            gst_bin_add(<GstBin *>self.pipeline, self.playbin)
 
-        # instantiate an appsink
-        if self.sample_cb:
-            self.appsink = gst_element_factory_make('appsink', NULL)
-            if self.appsink == NULL:
-                raise GstPlayerException('Unable to create an appsink')
+            # instantiate an appsink
+            if self.sample_cb:
+                self.appsink = gst_element_factory_make('appsink', NULL)
+                if self.appsink == NULL:
+                    raise GstPlayerException('Unable to create an appsink')
 
+                g_object_set_void(self.playbin, 'video-sink', self.appsink)
+
+            else:
+                self.fakesink = gst_element_factory_make('fakesink', NULL)
+                if self.fakesink == NULL:
+                    raise GstPlayerException('Unable to create a fakesink')
+
+                g_object_set_void(self.playbin, 'video-sink', self.fakesink)
+
+        if self.appsink != NULL:
             g_object_set_caps(self.appsink, 'video/x-raw,format=RGB')
             g_object_set_int(self.appsink, 'max-buffers', 5)
             g_object_set_int(self.appsink, 'drop', 1)
             g_object_set_int(self.appsink, 'sync', 1)
             g_object_set_int(self.appsink, 'qos', 1)
-            g_object_set_void(self.playbin, 'video-sink', self.appsink)
 
-        else:
-            self.fakesink = gst_element_factory_make('fakesink', NULL)
-            if self.fakesink == NULL:
-                raise GstPlayerException('Unable to create a fakesink')
-
-            g_object_set_void(self.playbin, 'video-sink', self.fakesink)
 
         # configure playbin
         g_object_set_int(self.pipeline, 'async-handling', 1)
-        py_uri = <bytes>self.uri.encode('utf-8')
-        g_object_set_void(self.playbin, 'uri', <char *>py_uri)
+        if self.playbin != NULL:
+            py_uri = <bytes>self.uri.encode('utf-8')
+            g_object_set_void(self.playbin, 'uri', <char *>py_uri)
 
         # attach the callback
         # NOTE no need to create a weakref here, as we manage to grab/release
@@ -267,10 +376,19 @@ cdef class GstPlayer:
         if self.sample_cb:
             self.hid_sample = c_appsink_set_sample_callback(
                     self.appsink, _on_appsink_sample, <void *>self)
-
+        if self.recording_options:
+            self.set_name_callback(self.recording_options['segment_file_template'])
         # get ready!
         with nogil:
             gst_element_set_state(self.pipeline, GST_STATE_READY)
+
+    def set_name_callback(self, segment_file_template):
+        self.message_cb('info', 'set_name_callback for segment_file_template={}'.format(segment_file_template))
+        self.recordingmuxer = gst_bin_get_by_name(<GstBin *> self.pipeline, 'recordingmuxer')
+
+        if self.recordingmuxer:
+            self.message_cb('info', 'setting get name call back')
+            c_element_get_format_location(self.recordingmuxer, <char*> segment_file_template)
 
     def play(self):
         if self.pipeline != NULL:
@@ -298,6 +416,10 @@ cdef class GstPlayer:
         if self.bus != NULL and self.hid_message != 0:
             c_signal_disconnect(<GstElement *>self.bus, self.hid_message)
             self.hid_message = 0
+
+        if self.bus != NULL and self.hid_on_get_format_location != 0 and self.recordingmuxer != NULL:
+            c_signal_disconnect(<GstElement *>self.recordingmuxer, self.hid_on_get_format_location)
+            self.hid_on_get_format_location = 0
 
         if self.pipeline != NULL:
             # the state changes are async. if we want to guarantee that the

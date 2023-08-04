@@ -60,6 +60,7 @@ typedef struct {
 
 typedef struct {
 	char *segment_file_template;
+	PyObject *userdata;
 } callback_get_format_location_data_t;
 
 static GstFlowReturn c_on_appsink_sample(GstElement *appsink, callback_data_t *data)
@@ -206,7 +207,7 @@ static gulong c_bus_connect_message(GstBus *bus, buscallback_t callback, PyObjec
 static void c_signal_free_get_format_location_data_t(gpointer data, GClosure *closure)
 {
 	callback_get_format_location_data_t *cdata = data;
-//	Py_DECREF(cdata);
+	Py_DECREF(cdata->userdata);
 	free(cdata);
 }
 
@@ -237,13 +238,14 @@ static char* c_on_get_format_location(GstElement *el, guint fragment_id, callbac
 	return format_location_callback(data->segment_file_template, fragment_id);
 }
 
-static gulong c_element_get_format_location(GstElement *el, char *segment_file_template)
+static gulong c_element_get_format_location(GstElement *el, char *segment_file_template, PyObject *userdata)
 {
 	callback_get_format_location_data_t *data = (callback_get_format_location_data_t *)malloc(sizeof(callback_get_format_location_data_t));
 	if ( data == NULL )
 		return 0;
 	data->segment_file_template = segment_file_template;
-//	Py_INCREF(data);
+	data->userdata = userdata;
+	Py_INCREF(data->userdata);
 
 	return g_signal_connect_data((GstElement *)el, "format-location",
 			G_CALLBACK(c_on_get_format_location), data,

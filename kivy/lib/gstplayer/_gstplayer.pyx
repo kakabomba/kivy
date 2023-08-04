@@ -106,7 +106,7 @@ cdef extern from '_gstplayer.h':
     gulong c_bus_connect_message(GstBus *bus,
             buscallback_t callback, void *userdata)
 
-    gulong c_element_get_format_location(GstElement *el, char *segment_file_template)
+    gulong c_element_get_format_location(GstElement *el, char *segment_file_template, void *userdata)
     void c_signal_disconnect(GstElement *appsink, gulong handler_id)
     void c_glib_iteration(int count)
 
@@ -388,7 +388,7 @@ cdef class GstPlayer:
 
         if self.recordingmuxer:
             self.message_cb('info', 'setting get name call back')
-            c_element_get_format_location(self.recordingmuxer, <char*> segment_file_template)
+            c_element_get_format_location(self.recordingmuxer, <char*> segment_file_template, <void *>self)
 
     def play(self):
         if self.pipeline != NULL:

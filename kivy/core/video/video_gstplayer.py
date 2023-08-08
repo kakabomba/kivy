@@ -48,13 +48,13 @@ def _on_gstplayer_buffer(video, width, height, data):
 
 def _on_gstplayer_message(mtype, message):
     if mtype == 'error':
-        Logger.error('VideoGstplayer: {}'.format(message))
+        Logger.error('GstPlayer: {}'.format(message))
     elif mtype == 'warning':
-        Logger.warning('VideoGstplayer: {}'.format(message))
+        Logger.warning('GstPlayer: {}'.format(message))
     elif mtype == 'info':
-        Logger.info('VideoGstplayer: {}'.format(message))
+        Logger.info('GstPlayer: {}'.format(message))
     else:
-        Logger.debug('VideoGstplayer: {}'.format(message))
+        Logger.debug('GstPlayer: {}'.format(message))
 
 
 class VideoGstplayer(VideoBase):

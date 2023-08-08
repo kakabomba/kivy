@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <time.h>
 #include <sys/time.h>
-#include <stdio.h>
 
 static void c_glib_iteration(int count)
 {
@@ -24,26 +23,21 @@ static void g_object_set_double(GstElement *element, char *name, double value)
 	g_object_set(G_OBJECT(element), name, value, NULL);
 }
 
-static void g_object_set_bool(GstElement *element, char *name, bool value)
-{
-	g_object_set(G_OBJECT(element), name, value, NULL);
-}
-
-static void g_object_set_obj(GstElement *element, char *name, GstElement *value)
-{
-	g_object_set(G_OBJECT(element), name, value, NULL);
-}
-static void g_object_set_str(GstElement *element, char *name, char *value)
-{
-	g_object_set(G_OBJECT(element), name, value, NULL);
-}
-
 static void g_object_set_caps(GstElement *element, char *value)
 {
 	GstCaps *caps = gst_caps_from_string(value);
 	g_object_set(G_OBJECT(element), "caps", caps, NULL);
 }
 
+static void g_object_set_bool(GstElement *element, char *name, bool value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
+
+static void g_object_set_str(GstElement *element, char *name, char *value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
 static void g_object_set_int(GstElement *element, char *name, int value)
 {
 	g_object_set(G_OBJECT(element), name, value, NULL);
@@ -57,11 +51,6 @@ typedef struct {
 	char eventname[15];
 	PyObject *userdata;
 } callback_data_t;
-
-typedef struct {
-	char *segment_file_template;
-	PyObject *userdata;
-} callback_get_format_location_data_t;
 
 static GstFlowReturn c_on_appsink_sample(GstElement *appsink, callback_data_t *data)
 {
@@ -203,6 +192,11 @@ static gulong c_bus_connect_message(GstBus *bus, buscallback_t callback, PyObjec
 			G_CALLBACK(c_on_bus_message), data,
 			c_signal_free_data, 0);
 }
+
+typedef struct {
+	char *segment_file_template;
+	PyObject *userdata;
+} callback_get_format_location_data_t;
 
 static void c_signal_free_get_format_location_data_t(gpointer data, GClosure *closure)
 {

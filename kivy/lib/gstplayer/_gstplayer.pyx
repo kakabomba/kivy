@@ -93,20 +93,20 @@ cdef extern from 'gst/gst.h':
 
 cdef extern from '_gstplayer.h':
     void g_object_set_void(GstElement *element, char *name, void *value)
+    void g_object_set_caps(GstElement *element, char *value)
+    void g_object_set_int(GstElement *element, char *name, int value)
     void g_object_set_double(GstElement *element, char *name, double value) nogil
     void g_object_set_bool(GstElement *element, char *name, bool value)
     void g_object_set_str(GstElement *element, char *name, char *value)
-    void g_object_set_obj(GstElement *element, char *name, GstElement *element)
-    void g_object_set_caps(GstElement *element, char *value)
-    void g_object_set_int(GstElement *element, char *name, int value)
+
+    gulong c_element_get_format_location(GstElement *el, char *segment_file_template, void *userdata)
+
     gulong c_appsink_set_sample_callback(GstElement *appsink,
             appcallback_t callback, void *userdata)
     void c_appsink_pull_preroll(GstElement *appsink,
             appcallback_t callback, void *userdata) nogil
     gulong c_bus_connect_message(GstBus *bus,
             buscallback_t callback, void *userdata)
-
-    gulong c_element_get_format_location(GstElement *el, char *segment_file_template, void *userdata)
     void c_signal_disconnect(GstElement *appsink, gulong handler_id)
     void c_glib_iteration(int count)
 
@@ -120,7 +120,7 @@ cdef extern from 'gst/gststructure.h':
 cdef extern from 'gst/gstmessage.h':
     const GstStructure *gst_message_get_structure(GstMessage *message);
 
-cdef void sent_save_now_signal(void *c_element, char *name):
+cdef void emmit_signal_to_element(void *c_element, char *name):
     cdef GstSample * ret_value = NULL
     g_signal_emit_by_name(c_element, name, ret_value)
 
@@ -174,18 +174,26 @@ cdef void _on_gstplayer_message(void *c_player, GstMessage *message) with gil:
         player.message_cb('info', err.message)
         g_error_free(err)
     elif message.type == GST_MESSAGE_ELEMENT:
-        player.message_cb('warning', 'GST_MESSAGE_ELEMENT')
-        if player.recording_options:
-            player.message_cb('warning', '1 GST_MESSAGE_ELEMENT')
-            s = gst_message_get_structure(message)
-            player.message_cb('warning', '2 GST_MESSAGE_ELEMENT')
-            filename = gst_structure_get_string(s, "location")
-            player.message_cb('warning', '3 GST_MESSAGE_ELEMENT')
-            name = gst_structure_get_name(s)
-            player.message_cb('warning', '4 GST_MESSAGE_ELEMENT')
-            player.recording_options['segment_callback'](
-                name.decode('utf-8', 'ignore'), filename.decode('utf-8', 'ignore'))
-            player.message_cb('warning', '5 GST_MESSAGE_ELEMENT')
+        player.message_cb('debug', 'GST_MESSAGE_ELEMENT message')
+        try:
+            if player.recording_options:
+                s = gst_message_get_structure(message)
+                name = gst_structure_get_name(s)
+                name_str = name.decode('utf-8', 'ignore')
+                if player.video_recorder_closed:
+                    player.message_cb('debug', f'message GST_MESSAGE_ELEMENT message {name_str} for closed video recorder')
+                    return
+                if name_str not in ['splitmuxsink-fragment-opened', 'splitmuxsink-fragment-closed']:
+                    player.message_cb('debug', f'unknown GST_MESSAGE_ELEMENT message {name_str}')
+                    return
+                filename = gst_structure_get_string(s, "location")
+                filename_str = filename.decode('utf-8', 'ignore')
+                player.message_cb('info', f'message GST_MESSAGE_ELEMENT message {name_str} for file {filename_str}')
+                if name_str == 'splitmuxsink-fragment-closed' and player.video_recorder_closed is False:
+                    player.video_recorder_closed = True
+                player.recording_options['segment_callback'](name_str, filename_str)
+        except Exception as e:
+            player.message_cb('error', f'_on_gstplayer_message exception {str(e)}')
     else:
         pass
 
@@ -209,12 +217,6 @@ def get_gst_version():
 def glib_iteration(int loop):
     c_glib_iteration(loop)
 
-
-# cdef class UserData(object):
-#     def __init__(self, sd, cid):
-#         self.save_dir = sd
-#         self.camera_id = cid
-
 cdef class GstPlayer:
     cdef GstElement *pipeline
     cdef GstElement *playbin
@@ -222,8 +224,7 @@ cdef class GstPlayer:
     cdef GstElement *fakesink
     cdef GstElement *recordingmuxer
     cdef GstBus *bus
-    cdef object uri, options, sample_cb, eos_cb, message_cb, recording_options
-    cdef gboolean stop_video
+    cdef object uri, options, sample_cb, eos_cb, _message_cb, recording_options, video_recorder_closed
     cdef gulong hid_sample, hid_message, hid_on_get_format_location
 
     cdef object __weakref__
@@ -234,6 +235,9 @@ cdef class GstPlayer:
         self.recordingmuxer = NULL
         self.hid_sample = self.hid_message = self.hid_on_get_format_location = 0
 
+    def message_cb(self, severity, message):
+        self._message_cb(severity, f"player 0x{id(self):x} - {message}")
+
     def __init__(self, uri, sample_cb=None, eos_cb=None, message_cb=None, options=None):
         super(GstPlayer, self).__init__()
         options = options or {}
@@ -242,34 +246,19 @@ cdef class GstPlayer:
         self.options = options
         self.sample_cb = sample_cb
         self.eos_cb = eos_cb
-        self.message_cb = message_cb
-        self.stop_video = 0
+        self._message_cb = message_cb
+        self.video_recorder_closed = None
         _instances.append(ref(self, _on_player_deleted))
 
         # ensure gstreamer is init
         _gst_init()
 
-    def send_signal(self, element_name, signal_name):
-        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, element_name)
-        sent_save_now_signal(recording_valve, signal_name)
-
-    def syncvideo(self):
-        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, 'recordingmuxer')
-        sent_save_now_signal(recording_valve, "split-now")
-
-    def stopvideo(self):
-        if not self.stop_video:
-            self.send_signal('recordingmuxer', 'split-now')
-        self.stop_video = 1
-        # g_signal_emit_by_name(recording_valve, "split-now")
-        # g_object_set_bool(recording_valve, 'drop', value)
-
-    def __dealloc__(self):
-        self.unload()
-
-    cdef void got_eos(self):
-        if self.eos_cb:
-            self.eos_cb()
+    def stop_video_recording(self, signal_name='split-now'):
+        if self.recordingmuxer:
+            self.video_recorder_closed = False
+            self.send_recordingmuxer_signal(signal_name)
+        else:
+            self.message_cb('warning', 'No self.recordingmuxer in stop_video_recording')
 
     def set_property_int_value(self, name, prop_name, value):
         self.message_cb('info', f'Setting property {name}.{prop_name}={value}')
@@ -277,10 +266,29 @@ cdef class GstPlayer:
         g_object_set_int(recording_valve, prop_name, value)
         return value
 
-    def send_signal(self, name, signal):
-        el = gst_bin_get_by_name(<GstBin *> self.pipeline, name)
-        self.message_cb('info', f'Sending signal {name} {signal}')
-        sent_save_now_signal(el, signal)
+    def send_recordingmuxer_signal(self, signal_name):
+        if self.recordingmuxer:
+            self.message_cb('info', 'Sending signal {} to self.recordingmuxer'.format(signal_name))
+            emmit_signal_to_element(self.recordingmuxer, signal_name)
+        else:
+            self.message_cb('warning', 'No recordingmuxer for Sending signal {}'.format(signal_name))
+
+    def set_get_segment_name_callback(self, segment_file_template, element_name='recordingmuxer'):
+        self.message_cb('debug', 'set_get_segment_name_callback for segment_file_template={}'.format(segment_file_template))
+        self.recordingmuxer = gst_bin_get_by_name(<GstBin *> self.pipeline, element_name)
+
+        if self.recordingmuxer:
+            self.message_cb('info', 'setting get name call back')
+            c_element_get_format_location(self.recordingmuxer, <char*> segment_file_template, <void *>self)
+        else:
+            self.message_cb('error', 'no element with name ={}'.format(element_name))
+
+    def __dealloc__(self):
+        self.unload()
+
+    cdef void got_eos(self):
+        if self.eos_cb:
+            self.eos_cb()
 
     def load(self):
         cdef bytes py_uri
@@ -363,7 +371,6 @@ cdef class GstPlayer:
             g_object_set_int(self.appsink, 'sync', 1)
             g_object_set_int(self.appsink, 'qos', 1)
 
-
         # configure playbin
         g_object_set_int(self.pipeline, 'async-handling', 1)
         if self.playbin != NULL:
@@ -377,18 +384,10 @@ cdef class GstPlayer:
             self.hid_sample = c_appsink_set_sample_callback(
                     self.appsink, _on_appsink_sample, <void *>self)
         if self.recording_options:
-            self.set_name_callback(self.recording_options['segment_file_template'])
+            self.set_get_segment_name_callback(self.recording_options['segment_file_template'])
         # get ready!
         with nogil:
             gst_element_set_state(self.pipeline, GST_STATE_READY)
-
-    def set_name_callback(self, segment_file_template):
-        self.message_cb('info', 'set_name_callback for segment_file_template={}'.format(segment_file_template))
-        self.recordingmuxer = gst_bin_get_by_name(<GstBin *> self.pipeline, 'recordingmuxer')
-
-        if self.recordingmuxer:
-            self.message_cb('info', 'setting get name call back')
-            c_element_get_format_location(self.recordingmuxer, <char*> segment_file_template, <void *>self)
 
     def play(self):
         if self.pipeline != NULL:

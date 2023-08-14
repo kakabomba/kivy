@@ -1,5 +1,3 @@
-import datetime
-
 from libcpp cimport bool
 from weakref import ref
 import atexit
@@ -48,9 +46,6 @@ cdef extern from 'gst/gst.h':
         GST_MESSAGE_WARNING
         GST_MESSAGE_INFO
         GST_MESSAGE_ELEMENT
-        GST_MESSAGE_SEGMENT_START
-        GST_MESSAGE_SEGMENT_DONE
-
 
     ctypedef struct GstMessage:
         GstMessageType type
@@ -95,9 +90,6 @@ cdef extern from '_gstplayer.h':
     void g_object_set_void(GstElement *element, char *name, void *value)
     void g_object_set_caps(GstElement *element, char *value)
     void g_object_set_int(GstElement *element, char *name, int value)
-    void g_object_set_double(GstElement *element, char *name, double value) nogil
-    void g_object_set_bool(GstElement *element, char *name, bool value)
-    void g_object_set_str(GstElement *element, char *name, char *value)
 
     gulong c_element_get_format_location(GstElement *el, char *segment_file_template, void *userdata)
 
@@ -164,15 +156,15 @@ cdef void _on_gstplayer_message(void *c_player, GstMessage *message) with gil:
     elif message.type == GST_MESSAGE_ERROR:
         gst_message_parse_error(message, &err, NULL)
         player.message_cb('error', err.message)
-        g_error_free(err)
+        g_error_free(err);
     elif message.type == GST_MESSAGE_WARNING:
         gst_message_parse_warning(message, &err, NULL)
         player.message_cb('warning', err.message)
-        g_error_free(err)
+        g_error_free(err);
     elif message.type == GST_MESSAGE_INFO:
         gst_message_parse_info(message, &err, NULL)
         player.message_cb('info', err.message)
-        g_error_free(err)
+        g_error_free(err);
     elif message.type == GST_MESSAGE_ELEMENT:
         player.message_cb('debug', 'GST_MESSAGE_ELEMENT message')
         try:
@@ -259,12 +251,6 @@ cdef class GstPlayer:
             self.send_recordingmuxer_signal(signal_name)
         else:
             self.message_cb('warning', 'No self.recordingmuxer in stop_video_recording')
-
-    def set_property_int_value(self, name, prop_name, value):
-        self.message_cb('info', f'Setting property {name}.{prop_name}={value}')
-        recording_valve = gst_bin_get_by_name(<GstBin *> self.pipeline, name)
-        g_object_set_int(recording_valve, prop_name, value)
-        return value
 
     def send_recordingmuxer_signal(self, signal_name):
         if self.recordingmuxer:

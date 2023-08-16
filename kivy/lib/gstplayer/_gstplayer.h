@@ -18,6 +18,11 @@ static void g_object_set_void(GstElement *element, char *name, void *value)
 	g_object_set(G_OBJECT(element), name, value, NULL);
 }
 
+static void g_object_set_double(GstElement *element, char *name, double value)
+{
+	g_object_set(G_OBJECT(element), name, value, NULL);
+}
+
 static void g_object_set_caps(GstElement *element, char *value)
 {
 	GstCaps *caps = gst_caps_from_string(value);

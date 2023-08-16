@@ -90,6 +90,7 @@ cdef extern from '_gstplayer.h':
     void g_object_set_void(GstElement *element, char *name, void *value)
     void g_object_set_caps(GstElement *element, char *value)
     void g_object_set_int(GstElement *element, char *name, int value)
+    void g_object_set_double(GstElement *element, char *name, double value) nogil
 
     gulong c_element_get_format_location(GstElement *el, char *segment_file_template, void *userdata)
 
